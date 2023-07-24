@@ -47,6 +47,12 @@
 #define D_CMND_RESOLUTION "Resolution"
 #define D_CMND_MTREG "MTime"
 
+#ifdef ESP32
+  #define BH1750_MAX_SENSORS    4     // 2 busses
+#else
+  #define BH1750_MAX_SENSORS    2
+#endif
+
 const char kBh1750Commands[] PROGMEM = D_PRFX_BH1750 "|"  // Prefix
   D_CMND_RESOLUTION "|" D_CMND_MTREG ;
 
@@ -62,10 +68,11 @@ struct {
 
 struct {
   uint8_t address;
+  uint8_t bus;
   uint8_t valid = 0;
   uint8_t mtreg = 69;                          // Default Measurement Time
   uint16_t illuminance = 0;
-} Bh1750_sensors[2];
+} Bh1750_sensors[BH1750_MAX_SENSORS];
 
 /*********************************************************************************************/
 
@@ -77,30 +84,60 @@ uint8_t Bh1750Resolution(uint32_t sensor_index) {
   return settings_resolution;
 }
 
-bool Bh1750SetResolution(uint32_t sensor_index) {
-  Wire.beginTransmission(Bh1750_sensors[sensor_index].address);
-  Wire.write(Bh1750.resolution[Bh1750Resolution(sensor_index)]);
-  return (!Wire.endTransmission());
+bool Bh1750SetResolution(uint32_t sensor_index) 
+{
+  uint8_t bus =  Bh1750_sensors[Bh1750.count].bus;
+#ifdef ESP32
+  if (bus && !TasmotaGlobal.i2c_enabled_2) { return false; }  // Error
+  TwoWire & myWire = (bus == 0) ? Wire : Wire1;
+#else
+  if (bus) { return false; }  // Second I2c bus ESP32 only
+  TwoWire & myWire = Wire;
+#endif
+
+  myWire.beginTransmission(Bh1750_sensors[sensor_index].address);
+  myWire.write(Bh1750.resolution[Bh1750Resolution(sensor_index)]);
+  return (!myWire.endTransmission());
 }
 
-bool Bh1750SetMTreg(uint32_t sensor_index) {
-  Wire.beginTransmission(Bh1750_sensors[sensor_index].address);
+bool Bh1750SetMTreg(uint32_t sensor_index) 
+{
+  uint8_t bus =  Bh1750_sensors[Bh1750.count].bus;
+#ifdef ESP32
+  if (bus && !TasmotaGlobal.i2c_enabled_2) { return false; }  // Error
+  TwoWire & myWire = (bus == 0) ? Wire : Wire1;
+#else
+  if (bus) { return false; }  // Second I2c bus ESP32 only
+  TwoWire & myWire = Wire;
+#endif
+
+  myWire.beginTransmission(Bh1750_sensors[sensor_index].address);
   uint8_t data = BH1750_MEASUREMENT_TIME_HIGH | ((Bh1750_sensors[sensor_index].mtreg >> 5) & 0x07);
-  Wire.write(data);
-  if (Wire.endTransmission()) { return false; }
-  Wire.beginTransmission(Bh1750_sensors[sensor_index].address);
+  myWire.write(data);
+  if (myWire.endTransmission()) { return false; }
+  myWire.beginTransmission(Bh1750_sensors[sensor_index].address);
   data = BH1750_MEASUREMENT_TIME_LOW | (Bh1750_sensors[sensor_index].mtreg & 0x1F);
-  Wire.write(data);
-  if (Wire.endTransmission()) { return false; }
+  myWire.write(data);
+  if (myWire.endTransmission()) { return false; }
   return Bh1750SetResolution(sensor_index);
 }
 
-bool Bh1750Read(uint32_t sensor_index) {
+bool Bh1750Read(uint32_t sensor_index) 
+{
+  uint8_t bus =  Bh1750_sensors[Bh1750.count].bus;
+#ifdef ESP32
+  if (bus && !TasmotaGlobal.i2c_enabled_2) { return false; }  // Error
+  TwoWire & myWire = (bus == 0) ? Wire : Wire1;
+#else
+  if (bus) { return false; }  // Second I2c bus ESP32 only
+  TwoWire & myWire = Wire;
+#endif
+
   if (Bh1750_sensors[sensor_index].valid) { Bh1750_sensors[sensor_index].valid--; }
 
-  if (2 != Wire.requestFrom(Bh1750_sensors[sensor_index].address, (uint8_t)2)) { return false; }
+  if (2 != myWire.requestFrom(Bh1750_sensors[sensor_index].address, (uint8_t)2)) { return false; }
 
-  float illuminance = (Wire.read() << 8) | Wire.read();
+  float illuminance = (myWire.read() << 8) | myWire.read();
   illuminance *= 57.5 / (float)Bh1750_sensors[sensor_index].mtreg;  // Fix #16022
   if (1 == Bh1750Resolution(sensor_index)) {
     illuminance /= 2;
@@ -113,16 +150,22 @@ bool Bh1750Read(uint32_t sensor_index) {
 
 /********************************************************************************************/
 
-void Bh1750Detect(void) {
-  for (uint32_t i = 0; i < sizeof(Bh1750.addresses); i++) {
-    if (!I2cSetDevice(Bh1750.addresses[i])) { continue; }
+void Bh1750Detect(void) 
+{
+  #warning "test1"
+    for (uint32_t i = 0; i < BH1750_MAX_SENSORS; i++) 
+    {
+      uint8_t bus = i >>1;
+      if (!I2cSetDevice(Bh1750.addresses[i%2]),bus) { continue; }
 
-    Bh1750_sensors[Bh1750.count].address = Bh1750.addresses[i];
-    if (Bh1750SetMTreg(Bh1750.count)) {
-      I2cSetActiveFound(Bh1750_sensors[Bh1750.count].address, Bh1750.types);
-      Bh1750.count++;
+      Bh1750_sensors[Bh1750.count].bus = bus;
+      Bh1750_sensors[Bh1750.count].address = Bh1750.addresses[i%2];
+      if (Bh1750SetMTreg(Bh1750.count)) 
+      {
+        I2cSetActiveFound(Bh1750_sensors[Bh1750.count].address, Bh1750.types,Bh1750_sensors[Bh1750.count].bus);
+        Bh1750.count++;
+      }
     }
-  }
 }
 
 void Bh1750EverySecond(void) {
@@ -164,24 +207,34 @@ void CmndBh1750MTime(void) {
 
 /********************************************************************************************/
 
-void Bh1750Show(bool json) {
-  for (uint32_t sensor_index = 0; sensor_index < Bh1750.count; sensor_index++) {
-    if (Bh1750_sensors[sensor_index].valid) {
-      char sensor_name[10];
+void Bh1750Show(bool json) 
+{
+  for (uint32_t sensor_index = 0; sensor_index < Bh1750.count; sensor_index++) 
+  {
+    if (Bh1750_sensors[sensor_index].valid) 
+    {
+      char sensor_name[12];
       strlcpy(sensor_name, Bh1750.types, sizeof(sensor_name));
-      if (Bh1750.count > 1) {
-        snprintf_P(sensor_name, sizeof(sensor_name), PSTR("%s%c%02X"), sensor_name, IndexSeparator(), Bh1750_sensors[sensor_index].address);  // BH1750-23
+      if (Bh1750.count > 1) 
+      {
+        snprintf_P( sensor_name, sizeof(sensor_name), PSTR("%s%c%02X%c%01X"), 
+                    sensor_name, IndexSeparator(), Bh1750_sensors[sensor_index].address,
+                    IndexSeparator(),Bh1750_sensors[sensor_index].bus);  // BH1750-23
       }
 
-      if (json) {
+      if (json) 
+      {
         ResponseAppend_P(JSON_SNS_ILLUMINANCE, sensor_name, Bh1750_sensors[sensor_index].illuminance);
 #ifdef USE_DOMOTICZ
-        if ((0 == TasmotaGlobal.tele_period) && (0 == sensor_index)) {
+        if ((0 == TasmotaGlobal.tele_period) && (0 == sensor_index)) 
+        {
           DomoticzSensor(DZ_ILLUMINANCE, Bh1750_sensors[sensor_index].illuminance);
         }
 #endif  // USE_DOMOTICZ
 #ifdef USE_WEBSERVER
-      } else {
+      } 
+      else 
+      {
         WSContentSend_PD(HTTP_SNS_ILLUMINANCE, sensor_name, Bh1750_sensors[sensor_index].illuminance);
 #endif  // USE_WEBSERVER
       }
